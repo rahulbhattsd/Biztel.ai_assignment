@@ -1,239 +1,287 @@
-High-Performance Order Processor
-A .NET 6+ Worker Service that ingests legacy order JSON files dropped into an IncomingOrders folder, validates and classifies them, and persists results into SQLite. A companion order generator tool produces test files (valid, invalid, corrupted, bursts). The project is intentionally simple to run as a console app during development and can be installed as a Windows Service for production usage.
+# High-Performance Order Processor
 
-Repository layout
+A .NET 6+ Worker Service that ingests legacy order JSON files dropped into an `IncomingOrders` folder, validates and classifies them, and persists results into SQLite. A companion order generator tool produces test files (valid, invalid, corrupted, bursts). The project runs as a console app during development and can be installed as a Windows Service.
 
-src/OrderProcessor.Worker/ — Worker service project
-FileWatcherService.cs — uses FileSystemWatcher to detect new files
-OrderProcessingService.cs — parsing, validation, business rules, persistence
-Data/AppDbContext.cs — EF Core SQLite DbContext
-Models/ — Order, ValidOrder, InvalidOrder, ProcessedFile
-IncomingOrders/ — drop-in folder used by default
-src/OrderGenerator.Tool/ — CLI tool to generate test JSON files
-tests/OrderProcessor.Tests/ — Automated tests (including IdempotencyTests)
-sample JSON files included under src/OrderProcessor.Worker/IncomingOrders/
-Prerequisites
+---
 
-.NET 6 SDK or newer
-Windows (for service install instructions); runtime works cross-platform when run as console
-Optional: sqlite3 or DB browser to inspect the DB file
-Quick start — run in console (development)
+## Repository layout
 
-Clone the repo
+- src/OrderProcessor.Worker/ — Worker service project
+  - FileWatcherService.cs — uses FileSystemWatcher to detect new files
+  - OrderProcessingService.cs — parsing, validation, business rules, persistence
+  - Data/AppDbContext.cs — EF Core SQLite DbContext
+  - Models/ — Order, ValidOrder, InvalidOrder, ProcessedFile
+  - IncomingOrders/ — drop-in folder used by default
+- src/OrderGenerator.Tool/ — CLI tool to generate test JSON files
+- tests/OrderProcessor.Tests/ — Automated tests (including IdempotencyTests)
+- README.md — this file
 
-git clone https://github.com/<your-org>/HighPerformanceOrderProcessor.git
-cd HighPerformanceOrderProcessor
-Run the Worker in console mode (shows logs in terminal)
+---
 
-dotnet run --project src/OrderProcessor.Worker
-The service will:
+## Prerequisites
 
-Ensure the IncomingOrders folder exists (default: src/OrderProcessor.Worker/IncomingOrders)
-Start a FileSystemWatcher and process new .json files as they appear
-Persist to SQLite database at data/orders.db (relative to worker project) by default
-Run the Order Generator to produce 1000 sample orders (example)
+- .NET 6 SDK or newer
+- Windows (for Windows Service instructions). The worker runs as a console app cross-platform.
+- Optional: sqlite3 or DB Browser for SQLite to inspect the DB file
 
-dotnet run --project src/OrderGenerator.Tool -- 1000
-See "Order generator" section for CLI options.
+---
 
-Run automated tests
+## Quick start — run in console (development)
 
-dotnet test
-Windows Service installation
+1. Clone the repo
+   ```bash
+   git clone https://github.com/<your-org>/HighPerformanceOrderProcessor.git
+   cd HighPerformanceOrderProcessor
+   ```
 
-Publish the worker as a self-contained or framework-dependent app. Example (framework-dependent):
+2. Run the Worker in console mode (shows logs in terminal)
+   ```bash
+   dotnet run --project src/OrderProcessor.Worker
+   ```
 
-dotnet publish src/OrderProcessor.Worker -c Release -o ./publish
-The publish output will contain OrderProcessor.Worker.exe (or OrderProcessor.Worker on non-Windows).
+   The service will:
+   - Ensure the IncomingOrders folder exists (default: `src/OrderProcessor.Worker/IncomingOrders`)
+   - Start a FileSystemWatcher and process new `.json` files as they appear
+   - Persist to SQLite database at `data/orders.db` (relative to worker project) by default
 
-Install Windows Service using sc.exe (run in elevated PowerShell/CMD). Use the full path to the published exe:
+3. Run the Order Generator to produce 1000 sample orders (example)
+   ```bash
+   dotnet run --project src/OrderGenerator.Tool -- 1000
+   ```
 
-sc create OrderProcessor binPath= "C:\path\to\HighPerformanceOrderProcessor\src\OrderProcessor.Worker\publish\OrderProcessor.Worker.exe" start= auto
-sc description OrderProcessor "High-Performance Order Processor - watches IncomingOrders and saves to SQLite"
-Start the service:
+4. Run automated tests
+   ```bash
+   dotnet test
+   ```
 
-sc start OrderProcessor
-To stop and remove:
+---
 
-sc stop OrderProcessor
-sc delete OrderProcessor
+## Windows Service installation
+
+1. Publish the worker:
+   ```powershell
+   dotnet publish src/OrderProcessor.Worker -c Release -o ./publish
+   ```
+
+2. Install the service (run as Administrator). Use the full path to published exe:
+   ```powershell
+   sc create OrderProcessor binPath= "C:\path\to\HighPerformanceOrderProcessor\src\OrderProcessor.Worker\publish\OrderProcessor.Worker.exe" start= auto
+   sc description OrderProcessor "High-Performance Order Processor - watches IncomingOrders and saves to SQLite"
+   sc start OrderProcessor
+   ```
+
+3. Stop and remove:
+   ```powershell
+   sc stop OrderProcessor
+   sc delete OrderProcessor
+   ```
+
 Notes:
+- If you publish framework-dependent, ensure target machine has required .NET runtime.
+- For production service installs, consider NSSM or a Windows service wrapper for better stdout/stderr management.
 
-If you publish framework-dependent, ensure the target machine has the required .NET runtime.
-For service installs on Windows you may prefer to use NSSM or Windows Service wrappers that give better control of stdout/stderr.
-Configuration
+---
 
-Incoming folder path, DB file path, logging level and other settings are configurable via appsettings.json or environment variables. Defaults:
-IncomingOrders folder: ./IncomingOrders inside worker project directory
-DB file: ./data/orders.db
-Logging: console + rolling file (Serilog)
-Environment variables override settings (e.g., WORKER_INCOMING_DIR, WORKER_DB_PATH).
-How it works (architecture & design)
+## Configuration
 
-FileWatcherService
+The worker reads configuration from `appsettings.json` and environment variables. Common settings:
 
-Uses FileSystemWatcher to receive Created/Changed events for *.json.
-Enqueues detected file paths into a processing queue for resilient worker threads.
-Debounces rapid duplicate events; uses a short delay/verify step to avoid processing while upstream process is still writing.
-File ingestion pipeline
+- Incoming folder path: `IncomingOrders` (env: `WORKER_INCOMING_DIR`)
+- DB file: `data/orders.db` (env: `WORKER_DB_PATH`)
+- Logging level and sinks are configurable via Serilog settings
 
-Event-driven (FileSystemWatcher) — polling not used.
-When a new file is detected, worker attempts to open it with retries and a small backoff to handle files still being written/locked.
-Before processing, the file content's SHA256 hash is computed. The hash is checked against the ProcessedFiles table with a UNIQUE constraint. If hash exists, the file is skipped (idempotency).
-Processing outcomes (valid/invalid) are stored transactionally in SQLite.
-Order processing & business rules
+Environment variables override `appsettings.json` values.
 
-JSON is parsed into an Order model (OrderId GUID, CustomerName, OrderDate, Items, TotalAmount).
-Validation rules:
-Invalid if TotalAmount < 0
-Invalid if CustomerName is missing or empty
-Business rule:
-If TotalAmount > 1000 → mark as HighValue = true
-Valid orders are inserted into ValidOrders.
-Invalid orders (including parse errors/corrupted JSON) are inserted into InvalidOrders with a clear FailureReason.
-Regardless of outcome, the file's SHA256 hash and processing metadata are stored in ProcessedFiles to prevent reprocessing.
-Persistence and schema (SQLite)
+---
 
-Tables:
-ValidOrders
-Id (PK)
-OrderId (GUID)
-CustomerName
-OrderDate (UTC)
-Items (JSON/text)
-TotalAmount (decimal)
-IsHighValue (bool)
-CreatedAt
-InvalidOrders
-Id (PK)
-RawContent (TEXT)
-FailureReason (TEXT)
-DetectedAt
-ProcessedFiles
-Id (PK)
-FileName
-FileHash (SHA256) — UNIQUE constraint
-ProcessedAt
-Outcome (Valid/Invalid/Error)
-Indexes/Constraints:
-UNIQUE(FileHash) on ProcessedFiles ensures idempotency by file content.
-Optionally, a UNIQUE constraint on ValidOrders.OrderId protects against duplicate logical orders.
-Idempotency implementation (explicit)
+## How it works (architecture & design)
 
-Each file's full content is hashed using SHA256.
-A ProcessedFiles table stores each processed file's hash and metadata with a UNIQUE constraint on the hash.
-On any new detected file:
-Compute its SHA256.
-If the hash already exists, the file is skipped and logged as "Already processed".
-If not, the service processes the file and inserts the hash in the same DB transaction as the order insert (so a crash won't leave partial state that allows reprocessing).
-This approach handles:
-Duplicate file names with identical content
-Re-delivery of the same file
-Retries and restarts of the service
-Order generator (src/OrderGenerator.Tool) This small CLI creates JSON files into the IncomingOrders folder to help evaluate behavior under different conditions.
+1. FileWatcherService
+   - Uses `FileSystemWatcher` to receive Created/Changed events for `*.json`.
+   - Enqueues detected file paths into a processing queue.
+   - Debounces rapid duplicate events and verifies file readability before processing.
+
+2. File ingestion pipeline
+   - Event-driven (FileSystemWatcher) — polling not used.
+   - When a new file is detected, worker attempts to open it with retries/backoff to handle files still being written/locked.
+   - Computes SHA256 hash of file content and checks `ProcessedFiles` table (UNIQUE constraint). If hash exists, file is skipped (idempotency).
+   - Processing and persistence are done transactionally where possible.
+
+3. Order processing & business rules
+   - JSON parsed into `Order` model:
+     - OrderId (GUID)
+     - CustomerName (string)
+     - OrderDate (UTC)
+     - Items (array)
+     - TotalAmount (decimal)
+   - Validation rules:
+     - Invalid if `TotalAmount < 0`
+     - Invalid if `CustomerName` is missing or empty
+   - Business rule:
+     - If `TotalAmount > 1000` → mark order as `HighValue`
+   - Valid orders inserted into `ValidOrders`.
+   - Invalid orders (including parse errors) inserted into `InvalidOrders` with `FailureReason`.
+   - File hash inserted into `ProcessedFiles` to prevent reprocessing.
+
+4. Persistence (SQLite)
+   - Tables:
+     - ValidOrders: stores parsed order fields + IsHighValue + timestamps
+     - InvalidOrders: stores raw content + FailureReason + timestamps
+     - ProcessedFiles: stores FileName, FileHash (SHA256, UNIQUE), Outcome, ProcessedAt
+   - `UNIQUE(FileHash)` ensures idempotency by content.
+
+---
+
+## Idempotency (explicit)
+
+- Each file's full content is hashed using SHA256.
+- `ProcessedFiles.FileHash` has a UNIQUE constraint.
+- Before processing a file, the service computes the hash; if it exists in the DB the file is skipped.
+- The hash is recorded in the same transaction as the order insert, preventing double-processing on crashes.
+
+This handles:
+- Duplicate filenames with identical content
+- Re-delivery of same file
+- Service restarts and retries
+
+---
+
+## Order generator (src/OrderGenerator.Tool)
+
+This CLI creates JSON files in the IncomingOrders folder to test various conditions.
 
 Usage examples:
 
-Generate 100 valid orders (default):
+- Generate 100 valid orders:
+  ```bash
+  dotnet run --project src/OrderGenerator.Tool -- 100
+  ```
 
-dotnet run --project src/OrderGenerator.Tool -- 100
-Generate 1000 files quickly (burst):
+- Generate 1000 files quickly (burst):
+  ```bash
+  dotnet run --project src/OrderGenerator.Tool -- 1000 --delay 0
+  ```
 
-dotnet run --project src/OrderGenerator.Tool -- 1000 --delay 0
-Generate 200 files, 20% invalid, 10% corrupted:
+- Generate 200 files, 20% invalid, 10% corrupted:
+  ```bash
+  dotnet run --project src/OrderGenerator.Tool -- 200 --invalid-rate 0.2 --corrupt-rate 0.1
+  ```
 
-dotnet run --project src/OrderGenerator.Tool -- 200 --invalid-rate 0.2 --corrupt-rate 0.1
-CLI flags (examples the tool exposes)
+- CLI flags:
+  - `<count>` (positional): number of files to generate
+  - `--delay <ms>`: delay between file creations (default 10ms)
+  - `--invalid-rate <0..1>`: fraction of files that are invalid
+  - `--corrupt-rate <0..1>`: fraction of files that are malformed
+  - `--output-dir <path>`: write files to this directory (defaults to worker IncomingOrders)
+  - `--hold <ms>`: create a file and keep it locked for `<ms>` to simulate locked-writing scenarios
 
-(positional) — number of files to generate
---delay — delay between file creations (default ~10ms)
---invalid-rate <0..1> — fraction of files that are invalid (negative TotalAmount or missing CustomerName)
---corrupt-rate <0..1> — fraction of files that are malformed JSON
---output-dir — where to write files (defaults to worker IncomingOrders)
---hold — create file and keep it locked for to simulate writing/locked file scenarios
-The generator is intentionally tiny and has its configuration exposed as CLI arguments so evaluators can easily tune scenarios.
+The generator is standalone and configurable via CLI arguments for quick evaluator tuning.
 
-Logging & observability
+---
 
-Uses structured logging (ILogger + Serilog).
-Important log events:
-New file detected
-File open/lock retries
-Processing started
-Validation errors (with reasons)
-Order saved (Valid or Invalid)
-Exceptions and retry events
-Logs are written to console and rolling files (configurable).
-The service catches exceptions per-file and continues processing other files; the worker process does not crash for individual failures.
-Testing Automated tests exist under tests/OrderProcessor.Tests. At minimum there is an IdempotencyTests.cs that exercises:
+## Logging & resiliency
 
-Processing the same file twice does not create duplicate DB records.
-Run tests:
+- Uses structured logging (ILogger + Serilog).
+- Logged events include:
+  - New file detected
+  - File open/lock retry attempts
+  - Processing started
+  - Validation failure and reasons
+  - Order saved (valid/invalid)
+  - Exceptions
+- The worker catches per-file exceptions and continues running. It is designed to stay alive during:
+  - File locks
+  - DB busy states
+  - Corrupted JSON
+  - High input spikes
 
+---
+
+## Testing
+
+Automated tests are under `tests/OrderProcessor.Tests`. At minimum there is an `IdempotencyTests.cs` that verifies the same file processed twice does not create duplicate DB records.
+
+Run all tests:
+```bash
 dotnet test
-Manual & integration test scenarios provided and how to repeat them
+```
 
-High-volume bursts
+Provided test scenarios (how to repeat):
 
-Start the worker:
-dotnet run --project src/OrderProcessor.Worker
-Run generator to produce 1000 files quickly:
-dotnet run --project src/OrderGenerator.Tool -- 1000 --delay 0
-Observe logs: you should see many "New file detected", "Processing started", "Order saved" messages and eventual catch-up. The service uses a bounded worker queue to avoid uncontrolled memory growth.
-Files still being written / locked files
+1. High-volume bursts
+   - Start worker:
+     ```bash
+     dotnet run --project src/OrderProcessor.Worker
+     ```
+   - Generate burst:
+     ```bash
+     dotnet run --project src/OrderGenerator.Tool -- 1000 --delay 0
+     ```
+   - Observe worker logs and DB contents.
 
-Use generator with --hold flag (if available) to create a file and keep it locked for N ms:
-dotnet run --project src/OrderGenerator.Tool -- 10 --hold 5000
-Or manually lock a file from PowerShell:
-$fs = [System.IO.File]::Open("src\OrderProcessor.Worker\IncomingOrders\locked.json", 'Open', 'ReadWrite', 'None')
-# keep $fs in the session to hold the lock
-Start the worker and confirm it retries and eventually processes the file once lock is released.
-Corrupted JSON handling
+2. Locked files
+   - Use generator with `--hold` to lock files:
+     ```bash
+     dotnet run --project src/OrderGenerator.Tool -- 10 --hold 5000
+     ```
+   - Or manually lock a file via PowerShell:
+     ```powershell
+     $fs = [System.IO.File]::Open("src\OrderProcessor.Worker\IncomingOrders\locked.json", 'Open', 'ReadWrite', 'None')
+     # Keep $fs open to hold lock, then release by closing the handle
+     ```
 
-Generate corrupted JSON files:
-dotnet run --project src/OrderGenerator.Tool -- 50 --corrupt-rate 0.5
-Worker logs parse errors and inserts records into InvalidOrders with FailureReason = "JSON parse error" (or similar).
-Invalid orders (business/validation failures)
+3. Corrupted JSON
+   - Generate some corrupted files:
+     ```bash
+     dotnet run --project src/OrderGenerator.Tool -- 50 --corrupt-rate 0.5
+     ```
+   - Worker will log parse errors and insert into `InvalidOrders`.
 
-Generate invalid orders:
-dotnet run --project src/OrderGenerator.Tool -- 50 --invalid-rate 1.0
-Worker inserts them into InvalidOrders with a clear reason (e.g., "TotalAmount negative", "CustomerName missing").
-Idempotency
+4. Invalid orders
+   - Generate invalid orders:
+     ```bash
+     dotnet run --project src/OrderGenerator.Tool -- 50 --invalid-rate 1.0
+     ```
 
-Drop the same file twice (same content, different filename) and confirm only one DB record created:
-Copy a processed file into IncomingOrders with a new name.
-Worker compares file hashes, detects duplicate, logs and skips.
-Automated test example:
-dotnet test --filter Idempotency
-Database inspection
+5. Idempotency
+   - Copy a processed file's content into a new file with different name and drop it into IncomingOrders. Worker will compute hash and skip if already processed.
+   - Run the Idempotency automated test:
+     ```bash
+     dotnet test --filter Idempotency
+     ```
 
-Default DB path: src/OrderProcessor.Worker/data/orders.db (relative)
-Inspect with sqlite3:
-sqlite3 src/OrderProcessor.Worker/data/orders.db
-sqlite> .tables
-sqlite> select * from ValidOrders limit 10;
-Sample JSON files (Examples you can drop into IncomingOrders)
+---
 
-Valid order (regular)
+## Sample JSON files
 
+Valid order:
+```json
 {
   "OrderId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
   "CustomerName": "Jane Doe",
   "OrderDate": "2024-11-01T12:00:00Z",
-  "Items": [{"Sku":"ABC123","Quantity":2,"UnitPrice":25.5}],
+  "Items": [
+    { "Sku": "ABC123", "Quantity": 2, "UnitPrice": 25.5 }
+  ],
   "TotalAmount": 51.0
 }
-High-value order (business rule triggered)
+```
 
+High-value order (TotalAmount > 1000):
+```json
 {
   "OrderId": "b3d9c1e5-6a01-4d1d-9f8f-1a2b3c4d5e6f",
   "CustomerName": "Acme Corp",
   "OrderDate": "2024-11-01T12:00:00Z",
-  "Items": [{"Sku":"BIGITEM","Quantity":1,"UnitPrice":1500.0}],
+  "Items": [
+    { "Sku": "BIGITEM", "Quantity": 1, "UnitPrice": 1500.0 }
+  ],
   "TotalAmount": 1500.0
 }
-Invalid order (negative total)
+```
 
+Invalid order (negative total):
+```json
 {
   "OrderId": "f7e8d9c0-1111-2222-3333-444455556666",
   "CustomerName": "John Smith",
@@ -241,41 +289,74 @@ Invalid order (negative total)
   "Items": [],
   "TotalAmount": -20.0
 }
-Corrupted JSON (malformed)
+```
 
+Corrupted JSON (malformed):
+```json
 { "OrderId": "bad-json", "CustomerName": "Broken
-Design decisions & tradeoffs
+```
 
-FileSystemWatcher (event-driven) chosen because the assignment forbids polling and it is efficient for local filesystem scenarios. It is susceptible to platform-specific quirks and missed events under extremely high load; to mitigate we:
-Use an in-memory debounce/queue and verification step
-Compute file hash and rely on DB uniqueness (idempotency) so missed duplicates don't cause double-processing
-Idempotency using content hashing is robust to filename changes and duplicate deliveries.
-SQLite chosen for simplicity and evaluator convenience. For distributed/scale needs it should be replaced by a central RDBMS and a queue (Azure Service Bus, RabbitMQ, Kafka).
-The code intentionally focuses on reliability per-file: per-file try/catch, retries on IO, small bounded worker pool to handle bursts without OOM.
-Resiliency & production improvements (one improvement)
+---
 
-Replace FileSystemWatcher-based ingestion with a message queue (e.g., Kafka, RabbitMQ, Azure Service Bus). The legacy system would publish messages (or a lightweight forwarder would) to the queue after writing completes. That enables:
-Distributed consumers
-Reliable retries and DLQs
-Better scaling and backpressure Other improvements (if more time):
-Move to transactional outbox for cross-service communication.
-Add metrics (Prometheus) and health endpoints.
-Add more comprehensive integration tests (end-to-end with containerized DB), and CI pipeline.
-Troubleshooting & FAQs
+## Database inspection
 
-"Service isn't processing files": Check the IncomingOrders path configured, ensure worker has permissions to read/write files and DB path, check logs.
-"Files processed multiple times": Confirm ProcessedFiles table exists and DB file is persistent between runs (not in ephemeral temp). Ensure no manual database resets.
-"Cannot install service": Ensure publish exe path is correct and run sc commands as Administrator.
-Contact
+Default DB path:
+```
+src/OrderProcessor.Worker/data/orders.db
+```
 
-Maintainer: rahulbhattsd (GitHub)
-Open an issue with details and logs if you hit problems.
-License
+Inspect with sqlite3:
+```bash
+sqlite3 src/OrderProcessor.Worker/data/orders.db
+sqlite> .tables
+sqlite> select * from ValidOrders limit 10;
+```
+
+---
+
+## Design decisions & tradeoffs
+
+- FileSystemWatcher chosen because the assignment forbids polling and it's efficient for local filesystems. It can miss events under extreme load; mitigations include:
+  - Debounce/verification step
+  - Using file content hashing + DB uniqueness for idempotency
+- Idempotency is implemented using content hashing (SHA256). This is robust to filename changes and duplicates.
+- SQLite chosen for simplicity. For scale, replace with central RDBMS and a message queue.
+- The design prioritizes per-file resilience and survivability: retries on IO, bounded worker queue, per-file exception handling.
+
+---
+
+## One improvement with more time
+
+Replace FileSystemWatcher with a message queue (RabbitMQ / Kafka / Azure Service Bus) and a small forwarder on the legacy system that publishes a message after file write completes. Benefits:
+- Reliable delivery, DLQs, retries
+- Horizontal scaling
+- Backpressure and monitoring
+
+---
+
+## Troubleshooting & FAQs
+
+- "Service isn't processing files": verify IncomingOrders config path, permissions, and check logs.
+- "Files processed multiple times": ensure `ProcessedFiles` table exists and DB file is persistent between runs.
+- "Cannot install service": confirm exe path and run installer commands as Administrator.
+
+---
+
+## Contact
+
+Maintainer: rahulbhattsd (GitHub)  
+Open an issue with logs and details if you encounter problems.
+
+---
+
+## License
 
 MIT
+
 Thank you — drop files into the IncomingOrders folder and watch orders flow into the DB. Happy testing!
  
  
+
 
 
 
